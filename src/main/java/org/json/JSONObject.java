@@ -158,6 +158,15 @@ public class JSONObject {
     public static final Object NULL = new Null();
 
     /**
+     * The maximum number of characters a numeric string may have to be parsed
+     * as a number, and the maximum number of decimal digits an integer may have
+     * when it is materialised from a BigDecimal. Longer numeric strings are kept
+     * as strings, and larger BigDecimal values are treated as unconvertible to
+     * BigInteger (CVE-2026-59171).
+     */
+    private static final int MAX_NUMBER_LENGTH = 1000;
+
+    /**
      * Construct an empty JSONObject.
      */
     public JSONObject() {
@@ -1227,7 +1236,15 @@ public class JSONObject {
             return (BigInteger) val;
         }
         if (val instanceof BigDecimal){
-            return ((BigDecimal) val).toBigInteger();
+            BigDecimal bd = (BigDecimal) val;
+            // Same ceiling as the parse-time number length guard: refuse to
+            // materialise an integer whose decimal representation would exceed
+            // MAX_NUMBER_LENGTH digits. Prevents DoS via short exponent
+            // literals like 1e100000000 (CVE-2026-59171).
+            if ((long) bd.precision() - bd.scale() > MAX_NUMBER_LENGTH) {
+                return defaultValue;
+            }
+            return bd.toBigInteger();
         }
         if (val instanceof Double || val instanceof Float){
             if (!numberIsFinite((Number)val)) {
@@ -1248,7 +1265,11 @@ public class JSONObject {
             // that type cast support that may truncate the decimal.
             final String valStr = val.toString();
             if(isDecimalNotation(valStr)) {
-                return new BigDecimal(valStr).toBigInteger();
+                BigDecimal bd = new BigDecimal(valStr);
+                if ((long) bd.precision() - bd.scale() > MAX_NUMBER_LENGTH) {
+                    return defaultValue;
+                }
+                return bd.toBigInteger();
             }
             return new BigInteger(valStr);
         } catch (Exception e) {
@@ -2270,7 +2291,8 @@ public class JSONObject {
      *
      * @param string
      *            A String. can not be null.
-     * @return A simple JSON value.
+     * @return A simple JSON value. If the string represents a number that is
+     *         too long, the string will be returned.
      * @throws NullPointerException
      *             Thrown if the string is null.
      */
@@ -2300,7 +2322,9 @@ public class JSONObject {
         char initial = string.charAt(0);
         if ((initial >= '0' && initial <= '9') || initial == '-') {
             try {
-                return stringToNumber(string);
+                if (string.length() <= MAX_NUMBER_LENGTH) {
+                    return stringToNumber(string);
+                }
             } catch (Exception ignore) {
             }
         }
