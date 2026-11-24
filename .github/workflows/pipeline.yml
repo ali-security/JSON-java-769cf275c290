@@ -4,15 +4,18 @@
 name: Java CI with Maven
 
 on:
-  push:
-    # branches: [ master ]
-  pull_request:
-    branches: [ master ]
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional Maven test selector, e.g. -Dtest=JSONObjectTest'
+        required: false
+        default: ''
 
 jobs:
   # old-school build and jar method. No tests run or compiled.
   build-1_6: 
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         # build for java 1.6, however don't run any tests
@@ -20,25 +23,33 @@ jobs:
     name: Java ${{ matrix.java }}
     steps:
       - uses: actions/checkout@v2
+      # Azul no longer serves JDK 6 to actions/setup-java, so the 1.6 toolchain
+      # comes from the openjdk:6b38-jdk image; the commands run inside it verbatim.
       - name: Setup java
-        uses: actions/setup-java@v1
-        with:
-          java-version: ${{ matrix.java }}
+        run: docker pull openjdk:6b38-jdk && docker run --rm openjdk:6b38-jdk java -version
       - name: Compile Java ${{ matrix.java }}
         run: |
+          docker run --rm -v "$PWD":/src -w /src openjdk:6b38-jdk sh -ec '
           mkdir -p target/classes
           javac -d target/classes/ src/main/java/org/json/*.java
+          '
       - name: Create java ${{ matrix.java }} JAR
         run: |
+          docker run --rm -v "$PWD":/src -w /src openjdk:6b38-jdk sh -ec '
           jar cvf target/org.json.jar -C target/classes .
+          '
       - name: Upload Java ${{ matrix.java }} JAR
-        uses: actions/upload-artifact@v1
+        uses: actions/upload-artifact@v4
         with:
           name: Java ${{ matrix.java }} JAR
           path: target/org.json.jar
       
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      # javac 11 overflows the default thread stack compiling the test sources
+      MAVEN_OPTS: -Xss16m
     strategy:
       matrix:
         # build against supported Java LTS versions:
@@ -54,7 +65,18 @@ jobs:
         run: mvn clean compile -Dmaven.compiler.source=${{ matrix.java }} -Dmaven.compiler.target=${{ matrix.java }} -Dmaven.test.skip=true -Dmaven.site.skip=true -Dmaven.javadoc.skip=true
       - name: Run Tests ${{ matrix.java }}
         run: |
-          mvn test -Dmaven.compiler.source=${{ matrix.java }} -Dmaven.compiler.target=${{ matrix.java }}
+          mvn test -Dmaven.compiler.source=${{ matrix.java }} -Dmaven.compiler.target=${{ matrix.java }} ${{ inputs.test-filter }}
+      - name: Package release JAR ${{ matrix.java }}
+        if: ${{ matrix.java == 8 }}
+        run: |
+          mvn package -Dmaven.test.skip=true -Dmaven.javadoc.skip=true -Dgpg.skip=true
+      - name: Upload release JAR ${{ matrix.java }}
+        if: ${{ matrix.java == 8 }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Release JAR ${{ matrix.java }}
+          path: target/json-*.jar
+          if-no-files-found: error
       - name: Build Test Report ${{ matrix.java }}
         if: ${{ always() }}
         run: |
@@ -62,13 +84,13 @@ jobs:
           mvn site -DgenerateReports=false -Dmaven.compiler.source=${{ matrix.java }} -Dmaven.compiler.target=${{ matrix.java }}
       - name: Upload Test Results ${{ matrix.java }}
         if: ${{ always() }}
-        uses: actions/upload-artifact@v1
+        uses: actions/upload-artifact@v4
         with:
           name: Test Results ${{ matrix.java }}
           path: target/surefire-reports/
       - name: Upload Test Report ${{ matrix.java }}
         if: ${{ always() }}
-        uses: actions/upload-artifact@v1
+        uses: actions/upload-artifact@v4
         with:
           name: Test Report ${{ matrix.java }}
           path: target/site/
